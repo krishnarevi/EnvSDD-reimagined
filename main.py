@@ -176,6 +176,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64, help="Batch size for training")
     parser.add_argument('--num_workers', type=int, default=16, help="Number of data loader workers")
     parser.add_argument('--accumulation_steps', type=int, default=1)
+    parser.add_argument('--diff_lr', action='store_true', default=False, help='Enable differential learning rates (only for EAT models)')
+   
 
     # Training Hyperparams
     parser.add_argument('--num_epochs', type=int, default=50)
@@ -261,21 +263,25 @@ if __name__ == '__main__':
         rawboost = RawBoostGPU(algo=args.algo, device=device).to(device)
 
     # --- Optimizer Configuration ---
-    if args.model == 'eat_lrg_aasist':
+    if args.model == 'eat_lrg_aasist' and args.diff_lr: 
         print("Configuring Differential Learning Rates for EAT-Large...")
         eat_params = list(map(id, model.ssl_model.model.parameters()))
         weights_params = list(map(id, [model.ssl_model.layer_weights]))
         base_params = filter(lambda p: id(p) not in eat_params and id(p) not in weights_params, model.parameters())
 
         optimizer = torch.optim.AdamW([
-            {'params': model.ssl_model.model.parameters(), 'lr': 5e-6},  # Backbone (Slow)
-            {'params': [model.ssl_model.layer_weights], 'lr': 1e-3},     # Weights (Fast)
-            {'params': base_params, 'lr': args.lr}                       # AASIST (Normal)
+            {'params': model.ssl_model.model.parameters(), 'lr': 5e-6}, # Backbone (Slow)
+            {'params': [model.ssl_model.layer_weights], 'lr': 1e-3},    # Weights (Fast)
+            {'params': base_params, 'lr': args.lr}                      # AASIST (Normal)
         ], weight_decay=args.weight_decay)
     else:
+        # Fallback for other models OR if --diff_lr is not set
+        if args.model == 'eat_lrg_aasist':
+            print("Using Standard Adam Optimizer (No Differential LR)...")
+            
         optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.lr,
+            filter(lambda p: p.requires_grad, model.parameters()), 
+            lr=args.lr, 
             weight_decay=args.weight_decay
         )
 
