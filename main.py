@@ -166,9 +166,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="EAT-AASIST High Performance Training")
 
     # Dataset Paths
-    parser.add_argument('--train_meta_json', type=str, default='tta/dev/train.json')
-    parser.add_argument('--dev_meta_json', type=str, default='tta/dev/valid.json')
-    parser.add_argument('--test_meta_json', type=str, default='tta/test/test_01.json')
+    parser.add_argument('--train_meta_json', type=str, default='dev_track1_train.json')
+    parser.add_argument('--dev_meta_json', type=str, default='dev_track1_valid.json')
+    parser.add_argument('--test_meta_json', type=str, default='test_track1.json')
     parser.add_argument('--protocols_path', type=str, default='./')
 
     # Hardware & Optimization
@@ -294,6 +294,12 @@ if __name__ == '__main__':
         eval_set = ADD_Dataset(args, list_IDs=file_eval, labels=d_label, is_eval=True, algo=None)
         produce_evaluation_file(eval_set, model, device, args.eval_output)
         eer = eval_to_score_file(args.eval_output, f'{config.metadata_json_file}/{args.test_meta_json}')
+        
+        eer_path = os.path.join(os.path.dirname(args.eval_output), "eer_test.txt")
+        with open(eer_path, "w") as f:
+            f.write(f"EER: {eer * 100:.2f}%\n")
+
+        print(f"EER saved to {eer_path}")
         sys.exit()
 
     # --- Training Setup ---

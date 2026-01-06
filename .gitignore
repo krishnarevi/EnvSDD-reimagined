@@ -2,7 +2,9 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+#outputs
+eval_output
+exps
 # C extensions
 *.so
 

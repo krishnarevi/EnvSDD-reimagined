@@ -14,7 +14,7 @@ from networks.w2v2_aasist import Model as w2v2_aasist
 from networks.aasist import Model as aasist
 from networks.beats_aasist import Model as beats_aasist
 from networks.eat_aasist import Model as eat_aasist  
-from networks.eat_lrg_aasist import Model as eat_lrg_aasist  
+from networks.eat_lrg_aasist_copy import Model as eat_lrg_aasist  
 import config
 
 # --- Blind Dataset ---
