@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
+import torchaudio.compliance.kaldi as kaldi
 from transformers import AutoModel
 from .w2v2_aasist import Residual_block, GraphAttentionLayer, GraphPool, HtrgGraphAttentionLayer
 
@@ -16,27 +17,12 @@ class SSLModel(nn.Module):
         self.model = AutoModel.from_pretrained(self.model_id, trust_remote_code=True)
         self.model.eval() 
         
+        # EAT-Large output dimension is 1024
         self.out_dim = 1024
         self.norm_mean = -4.268
         self.norm_std = 4.569
         
-        # 2. GPU-Accelerated Feature Extraction (Replaces slow loop)
-        self.mel_layer = torchaudio.transforms.MelSpectrogram(
-            sample_rate=16000,
-            n_fft=400,
-            win_length=400,
-            hop_length=160,
-            f_min=20,
-            n_mels=128,
-            window_fn=torch.hann_window,
-            power=2.0,
-            mel_scale="htk",
-            center=False,
-            pad_mode="reflect",
-            normalized=False
-        )
-        
-        # 3. Hook Setup
+        # Hook Setup (Unchanged)
         self._hook_features = None
         target_module = None
         
@@ -66,25 +52,56 @@ class SSLModel(nn.Module):
         if isinstance(output, tuple): self._hook_features = output[0]
         else: self._hook_features = output
 
+    def _preprocess_batch(self, waveforms):
+        """
+        Matches EAT-Base logic using Kaldi fbank.
+        """
+        mel_batch = []
+        for wav in waveforms:
+            # 1. Zero Mean
+            wav = wav - wav.mean()
+            
+            # 2. Kaldi Fbank (Strict compliance params)
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+            
+            mel = kaldi.fbank(
+                wav,
+                htk_compat=True,
+                sample_frequency=16000,
+                use_energy=False,
+                window_type='hanning',
+                num_mel_bins=128,
+                dither=0.0,
+                frame_shift=10
+            ) 
+            
+            # 3. Padding / Trimming to multiple of 16
+            n_frames = mel.shape[0]
+            target_len = ((n_frames + 15) // 16) * 16
+            
+            diff = target_len - n_frames
+            if diff > 0:
+                mel = F.pad(mel, (0, 0, 0, diff)) 
+            elif diff < 0:
+                mel = mel[:target_len, :]
+            
+            mel_batch.append(mel)
+            
+        mels = torch.stack(mel_batch)
+        mels = (mels - self.norm_mean) / (self.norm_std * 2)
+        mels = mels.unsqueeze(1) # (Batch, 1, Time, Freq)
+        
+        return mels.to(self.device)
+
     def extract_feat(self, x):
         # x shape: (Batch, Time)
         
-        # --- 1. Vectorized Preprocessing on GPU ---
+        # --- 1. Correct Preprocessing ---
         with torch.no_grad():
-            x = x - x.mean(dim=-1, keepdim=True)
-            mels = self.mel_layer(x)
-            mels = torch.log(mels + 1e-6)
-            mels = mels.transpose(1, 2)
-            
-            B, T, D = mels.shape
-            target_T = ((T + 15) // 16) * 16
-            if target_T > T:
-                mels = F.pad(mels, (0, 0, 0, target_T - T))
-            elif target_T < T:
-                mels = mels[:, :target_T, :]
-            
-            mels = (mels - self.norm_mean) / (self.norm_std * 2)
-            mels = mels.unsqueeze(1)
+             # x comes in as (Batch, Time), needs to be list or split for loop if on CPU
+             # but _preprocess_batch handles tensor iteration
+             mels = self._preprocess_batch(x)
 
         # --- 2. Forward Pass ---
         self._hook_features = None
@@ -153,6 +170,9 @@ class Model(nn.Module):
         self.out_layer = nn.Linear(5 * gat_dims[1], 2)
 
     def forward(self, x):
+        # x: (Batch, Samples) - Squeeze last dim if (Batch, Samples, 1) or similar
+        if x.dim() == 3: x = x.squeeze(-1)
+            
         x_ssl_feat = self.ssl_model.extract_feat(x)
         x = self.LL(x_ssl_feat) 
         x = x.transpose(1, 2)

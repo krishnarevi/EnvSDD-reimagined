@@ -2,7 +2,7 @@ import argparse
 import os
 import random
 import sys
-from typing import Optional, Callable
+from typing import Optional
 
 import numpy as np
 import torch
@@ -11,39 +11,25 @@ from torch.utils.data import DataLoader, Dataset
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-# --- Local Imports ---
 import config
 from data_utils import genSpoof_list, ADD_Dataset, eval_to_score_file
-from rawboost_gpu import RawBoostGPU
 
-# --- Network Imports ---
 from networks.w2v2_aasist import Model as w2v2_aasist
 from networks.aasist import Model as aasist
 from networks.beats_aasist import Model as beats_aasist
 from networks.eat_lrg_aasist import Model as eat_lrg_aasist
 from networks.eat_aasist import Model as eat_aasist
 
-
-# Allow TF32 on Ampere+ GPUs (Significant speedup for FP32 ops)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-# Enable CUDNN autotuner to find best algorithms for your hardware
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False 
 
 
-def evaluate_accuracy(
-    dev_loader: DataLoader, 
-    model: nn.Module, 
-    device: str
-) -> float:
-    """
-    Evaluates the model on the validation set using Cross Entropy Loss.
-    """
+def evaluate_accuracy(dev_loader: DataLoader, model: nn.Module, device: str) -> float:
     val_loss = 0.0
     num_total = 0.0
     model.eval()
     
-    # Weighted Cross Entropy for class imbalance
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
 
@@ -52,11 +38,9 @@ def evaluate_accuracy(
             batch_size = batch_x.size(0)
             num_total += batch_size
             
-            # Non-blocking transfer is crucial for speed
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.view(-1).type(torch.int64).to(device, non_blocking=True)
 
-            # Use mixed precision (bfloat16) for evaluation
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 batch_out = model(batch_x)
                 batch_loss = criterion(batch_out, batch_y)
@@ -67,21 +51,9 @@ def evaluate_accuracy(
     return val_loss
 
 
-def produce_evaluation_file(
-    dataset: Dataset, 
-    model: nn.Module, 
-    device: str, 
-    save_path: str
-) -> None:
-    """
-    Generates score file for the evaluation dataset.
-    """
+def produce_evaluation_file(dataset: Dataset, model: nn.Module, device: str, save_path: str) -> None:
     data_loader = DataLoader(
-        dataset, 
-        batch_size=32, 
-        shuffle=False, 
-        drop_last=False, 
-        num_workers=8
+        dataset, batch_size=32, shuffle=False, drop_last=False, num_workers=8
     )
     
     model.eval()
@@ -95,9 +67,7 @@ def produce_evaluation_file(
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                     batch_out = model(batch_x)
                 
-                # Extract scores for the 'spoof' class (index 1)
                 batch_score = batch_out[:, 1].float().cpu().numpy().ravel()
-                
                 for f, cm in zip(utt_id, batch_score):
                     fh.write(f'{f}|{cm}\n')
 
@@ -109,20 +79,18 @@ def train_epoch(
     model: nn.Module, 
     optimizer: torch.optim.Optimizer, 
     device: str, 
-    accumulation_steps: int, 
-    rawboost_fn: Optional[Callable] = None
+    accumulation_steps: int
 ) -> float:
-    """
-    Runs one training epoch with Gradient Accumulation and Mixed Precision.
-    """
     running_loss = 0.0
     num_total = 0.0
     model.train()
 
+    # Freeze EAT backbone in eval mode for stability
+    if hasattr(model, 'ssl_model'):
+        model.ssl_model.eval()
+
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
-    
-    # Gradient Scaler for AMP
     scaler = torch.cuda.amp.GradScaler()
 
     step_nums = 0
@@ -130,16 +98,9 @@ def train_epoch(
         batch_size = batch_x.size(0)
         num_total += batch_size
 
-        # 1. Non-blocking Async Transfer (CPU -> GPU)
         batch_x = batch_x.to(device, non_blocking=True)
         batch_y = batch_y.view(-1).type(torch.int64).to(device, non_blocking=True)
 
-        # 2. Apply GPU Augmentation (Vectorized)
-        if rawboost_fn is not None:
-            with torch.no_grad():  # No gradients needed for augmentation logic
-                batch_x = rawboost_fn(batch_x)
-
-        # 3. Forward Pass with Automatic Mixed Precision (BFloat16)
         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
             batch_out = model(batch_x)
             batch_loss = criterion(batch_out, batch_y)
@@ -147,10 +108,8 @@ def train_epoch(
 
         running_loss += (batch_loss.item() * batch_size)
 
-        # 4. Backward Pass
         scaler.scale(batch_loss).backward()
 
-        # 5. Optimizer Step
         if (step_nums + 1) % accumulation_steps == 0:
             scaler.step(optimizer)
             scaler.update()
@@ -163,7 +122,7 @@ def train_epoch(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="EAT-AASIST High Performance Training")
+    parser = argparse.ArgumentParser(description="EAT-AASIST Training")
 
     # Dataset Paths
     parser.add_argument('--train_meta_json', type=str, default='dev_track1_train.json')
@@ -171,22 +130,22 @@ if __name__ == '__main__':
     parser.add_argument('--test_meta_json', type=str, default='test_track1.json')
     parser.add_argument('--protocols_path', type=str, default='./')
 
+
     # Hardware & Optimization
     parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--batch_size', type=int, default=64, help="Batch size for training")
-    parser.add_argument('--num_workers', type=int, default=16, help="Number of data loader workers")
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=16)
     parser.add_argument('--accumulation_steps', type=int, default=1)
-    parser.add_argument('--diff_lr', action='store_true', default=False, help='Enable differential learning rates (only for EAT models)')
-   
+    parser.add_argument('--diff_lr', action='store_true', default=False)
 
-    # Training Hyperparams
+    # Hyperparams
     parser.add_argument('--num_epochs', type=int, default=50)
     parser.add_argument('--patience', type=int, default=5)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--loss', type=str, default='weighted_CCE')
-    parser.add_argument('--algo', type=int, default=5, help='RawBoost Algo (default 5)')
     parser.add_argument('--seed', type=int, default=1234)
+    parser.add_argument('--augment', action='store_true', default=False, help='Apply robust augmentation')
 
     # Model
     parser.add_argument('--model', type=str, default='eat_lrg_aasist')
@@ -201,15 +160,22 @@ if __name__ == '__main__':
 
     # --- Directory Setup ---
     output_folder = os.path.join(args.protocols_path, f'exps/exp_{args.exp_id}')
-    if not os.path.exists(f'{output_folder}/ckpts'):
-        os.makedirs(f'{output_folder}/ckpts')
+    os.makedirs(f'{output_folder}/ckpts', exist_ok=True)
 
-    # --- Seeding ---
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    # False is faster, True is reproducible (but slower on some kernels)
-    torch.backends.cudnn.deterministic = False
+    # --- Strict Seeding ---
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    
+    torch.backends.cudnn.deterministic = True
+    
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
 
     # --- Model Tagging ---
     model_tag = '{}_{}_ep{}_bs{}_acc{}_lr{}'.format(
@@ -220,22 +186,17 @@ if __name__ == '__main__':
         model_tag = model_tag + '_{}'.format(args.comment)
     
     model_save_path = os.path.join(f'{output_folder}/ckpts', model_tag)
-    
     if args.eval_output is None:
         args.eval_output = os.path.join(model_save_path, 'eval_scores.txt')
-        
-    if not os.path.exists(model_save_path):
-        os.makedirs(model_save_path, exist_ok=True)
+    os.makedirs(model_save_path, exist_ok=True)
 
     device = args.device
     print(f'Device: {device} | Batch Size: {args.batch_size} | Workers: {args.num_workers}')
 
     # --- Model Initialization ---
     if args.model == 'eat_lrg_aasist':
-        print("Initializing EAT-Large AASIST...")
         model = eat_lrg_aasist(args, device)
     elif args.model == 'eat_aasist':
-        print("Initializing BASE EAT-AASIST...")
         model = eat_aasist(args, device)
     elif args.model == 'w2v2_aasist':
         model = w2v2_aasist(args, device)
@@ -253,32 +214,35 @@ if __name__ == '__main__':
         sys.exit(f'Model {args.model} not found')
 
     model.to(device)
-    nb_params = sum([param.view(-1).size()[0] for param in model.parameters() if param.requires_grad])
+    nb_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
     print(f'Trainable parameters: {nb_params}')
 
-    # --- Augmentation Initialization ---
-    rawboost = None
-    if not args.eval and args.algo:
-        print(f"Initializing GPU-Accelerated RawBoost (Algo {args.algo})...")
-        rawboost = RawBoostGPU(algo=args.algo, device=device).to(device)
-
     # --- Optimizer Configuration ---
-    if args.model == 'eat_lrg_aasist' and args.diff_lr: 
-        print("Configuring Differential Learning Rates for EAT-Large...")
-        eat_params = list(map(id, model.ssl_model.model.parameters()))
-        weights_params = list(map(id, [model.ssl_model.layer_weights]))
-        base_params = filter(lambda p: id(p) not in eat_params and id(p) not in weights_params, model.parameters())
+    if hasattr(model, 'ssl_model') and args.diff_lr:
+        print(f"Configuring Differential Learning Rates for {args.model}...")
+        
+        weight_params = []
+        weight_ids = []
+        if hasattr(model.ssl_model, 'layer_weights'):
+            weight_params = [model.ssl_model.layer_weights]
+            weight_ids = [id(p) for p in weight_params]
+        
+        ssl_params = [p for p in model.ssl_model.parameters() if id(p) not in weight_ids]
+        ssl_ids = [id(p) for p in ssl_params]
+        
+        base_params = [p for p in model.parameters() if id(p) not in ssl_ids and id(p) not in weight_ids]
 
-        optimizer = torch.optim.AdamW([
-            {'params': model.ssl_model.model.parameters(), 'lr': 5e-6}, # Backbone (Slow)
-            {'params': [model.ssl_model.layer_weights], 'lr': 1e-3},    # Weights (Fast)
-            {'params': base_params, 'lr': args.lr}                      # AASIST (Normal)
-        ], weight_decay=args.weight_decay)
-    else:
-        # Fallback for other models OR if --diff_lr is not set
-        if args.model == 'eat_lrg_aasist':
-            print("Using Standard Adam Optimizer (No Differential LR)...")
+        param_groups = [
+            {'params': ssl_params, 'lr': 5e-6},
+            {'params': base_params, 'lr': args.lr}
+        ]
+        if weight_params:
+            param_groups.append({'params': weight_params, 'lr': 1e-3})
             
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
+
+    else:
+        print("Using Standard Adam Optimizer...")
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, model.parameters()), 
             lr=args.lr, 
@@ -294,8 +258,7 @@ if __name__ == '__main__':
         print('====== Evaluation ======')
         d_label, file_eval = genSpoof_list(
             dir_meta=f'{config.metadata_json_file}/{args.test_meta_json}', 
-            is_train=True, 
-            is_eval=False
+            is_train=True, is_eval=False
         )
         eval_set = ADD_Dataset(args, list_IDs=file_eval, labels=d_label, is_eval=True, algo=None)
         produce_evaluation_file(eval_set, model, device, args.eval_output)
@@ -303,43 +266,44 @@ if __name__ == '__main__':
         
         eer_path = os.path.join(os.path.dirname(args.eval_output), "eer_test.txt")
         with open(eer_path, "w") as f:
-            f.write(f"EER: {eer * 100:.2f}%\n")
-
+            f.write(f"EER: {eer * 100:.6f}%\n")
         print(f"EER saved to {eer_path}")
         sys.exit()
 
     # --- Training Setup ---
     d_label_trn, file_train = genSpoof_list(
         dir_meta=f'{config.metadata_json_file}/{args.train_meta_json}', 
-        is_train=True, 
-        is_eval=False
+        is_train=True, is_eval=False
     )
     print(f'Train data: {len(file_train)} trials')
 
-    # CRITICAL: algo=None because we now use GPU augmentation
-    train_set = ADD_Dataset(args, list_IDs=file_train, labels=d_label_trn, algo=None)
+    # train_set = ADD_Dataset(args, list_IDs=file_train, labels=d_label_trn, algo=None)
+    train_set = ADD_Dataset(args, list_IDs=file_train, labels=d_label_trn, algo=None, augment=args.augment)
 
-    # OPTIMIZATION: High-throughput Data Loader
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=True,
         drop_last=True,
-        pin_memory=True,        # Required for non_blocking=True
-        prefetch_factor=2,      # Preload 2 batches per worker
-        persistent_workers=True # Keep workers alive between epochs
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+        worker_init_fn=seed_worker,
+        generator=g
     )
 
     d_label_dev, file_dev = genSpoof_list(
         dir_meta=f'{config.metadata_json_file}/{args.dev_meta_json}', 
-        is_train=False, 
-        is_eval=False
+        is_train=False, is_eval=False
     )
     print(f'Validation data: {len(file_dev)} trials')
 
-    dev_set = ADD_Dataset(args, list_IDs=file_dev, labels=d_label_dev, algo=None)
-
+    # dev_set = ADD_Dataset(args, list_IDs=file_dev, labels=d_label_dev, algo=None)
+    dev_set = ADD_Dataset(args, list_IDs=file_dev, labels=d_label_dev, algo=None, augment=False)
     dev_loader = DataLoader(
         dev_set,
         batch_size=args.batch_size,
@@ -360,12 +324,7 @@ if __name__ == '__main__':
             print(f"Early stopping at epoch {epoch}")
             break
 
-        # Call train epoch with GPU augmentations
-        running_loss = train_epoch(
-            train_loader, model, optimizer, device,
-            args.accumulation_steps, rawboost_fn=rawboost
-        )
-
+        running_loss = train_epoch(train_loader, model, optimizer, device, args.accumulation_steps)
         val_loss = evaluate_accuracy(dev_loader, model, device)
 
         writer.add_scalar('val_loss', val_loss, epoch)
