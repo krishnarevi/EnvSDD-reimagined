@@ -5,9 +5,9 @@
 MODEL=$1          # ex: eat_lrg_aasist
 MODE=$2           # train or eval
 MODEL_PATH=$3     # required for eval, 'none' for train
-ALGO=$4           # ex: 5 (RawBoost) or 0 (None)
-EXP_ID=$5         # ex: exp_baseline
-DIFF_LR_FLAG=$6   # ex: "--diff_lr" or "" (empty)
+EXP_ID=$4         # ex: exp_baseline
+DIFF_LR_FLAG=$5  # ex: "--diff_lr" or "" (empty)
+AUGMENT_FLAG=$6
 
 # --- ENVIRONMENT SETUP ---
 source /etc/profile.d/modules.sh
@@ -33,20 +33,20 @@ CMD="python -u main.py \
     --dev_meta_json $DEV_JSON \
     --test_meta_json $TEST_JSON \
     --model $MODEL \
-    --algo $ALGO \
     --exp_id $EXP_ID \
-    $DIFF_LR_FLAG"
+    $DIFF_LR_FLAG \
+    $AUGMENT_FLAG"
 
 # --- TRAIN MODE CONFIG ---
 if [[ "$MODE" == "train" ]]; then
     # Adjust batch size/workers for your specific GPU (A100/H100)
-    CMD="$CMD --batch_size 32 --num_workers 8 --lr 0.0001"
+    CMD="$CMD --batch_size 32 --num_workers 2 --lr 0.00001"
 fi
 
 # --- EVAL MODE CONFIG ---
 if [[ "$MODE" == "eval" ]]; then
     if [[ "$MODEL_PATH" == "none" ]]; then
-        echo " ERROR: model_path is required for eval mode."
+        echo "❌ ERROR: model_path is required for eval mode."
         deactivate
         exit 1
     fi
@@ -54,9 +54,10 @@ if [[ "$MODE" == "eval" ]]; then
     CMD="$CMD --eval --model_path $MODEL_PATH --batch_size 64"
 fi
 
-# --- EXECUTION ---
+# --- EXECUtion
 echo "------------------------------------------------"
-echo "Mode: $MODE | Algo: $ALGO | ExpID: $EXP_ID | Diff-LR: '$DIFF_LR_FLAG'"
+echo "Mode: $MODE | ExpID: $EXP_ID"
+echo "Flags: Diff-LR='${DIFF_LR_FLAG}' | Augment='${AUGMENT_FLAG}'"
 echo "Command: $CMD"
 echo "------------------------------------------------"
 

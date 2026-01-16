@@ -18,4 +18,4 @@ metadata_json_file = r".\jsons"
 
 # ENVSDD test data
 envsdd_test_folder = p(r"C:\Users\krevi\Documents\Uni\SEM3\ENVSDD\DATA\Track1\test_track1_2\test_track1")
-envsdd_test_meta_path  = p(r"C:\Users\krevi\Documents\Uni\SEM3\ENVSDD\EnvSDD-reimagined\metadata\test_tack1.csv")
+envsdd_test_meta_path  = p(r"C:\Users\krevi\Documents\Uni\SEM3\ENVSDD\EnvSDD-reimagined\metadata\test_track1.csv")

@@ -36,9 +36,9 @@ def pad_tensor(x: Tensor, max_len: int = MAX_LEN_DEFAULT) -> Tensor:
     return F.pad(x, (0, diff))
 
 
-def ahu_augmentation(waveform: Tensor, sample_rate: int) -> Tensor:
+def target_augmentation(waveform: Tensor, sample_rate: int) -> Tensor:
     """
-    Implements AHU-style augmentations for robustness against unknown sources.
+    Implements targeted augmentations for robustness against unknown sources.
     1. Codec Augmentation (MP3/Telephony simulation)
     2. Loudness/Gain Normalization
     """
@@ -130,7 +130,7 @@ class ADD_Dataset(Dataset):
             # --- APPLY AUGMENTATION HERE ---
             # Only augment if flag is True and we represent training data (labels exist)
             if self.augment and not self.is_eval and self.labels is not None:
-                X = ahu_augmentation(X, self.target_sr)
+                X = target_augmentation(X, self.target_sr)
             # -------------------------------
 
         except Exception as e:

@@ -6,6 +6,8 @@ __pycache__/
 eval_output
 exps
 old
+plots
+plot*
 # C extensions
 *.so
 
