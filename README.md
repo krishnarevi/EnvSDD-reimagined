@@ -29,6 +29,7 @@ Our architecture combines a powerful pre-trained front-end with a graph-based ba
 
 - **Front-End (EAT)**: We use the **Efficient Audio Transformer (EAT)** to extract high-level acoustic representations.
 - **Back-End (AASIST)**: These features are processed by an **Integrated Spectro-Temporal Graph Attention Network (AASIST)** to differentiate genuine signals from generated noise.
+- Model checkpoint can be downloaded from [here] (https://drive.google.com/file/d/1f26tEVuMwaPQULZnatwgabcVqMyWsxqc/view?usp=sharing)
 
 ### 🔧 Key Features
 
